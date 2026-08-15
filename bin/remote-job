@@ -1,0 +1,195 @@
+#!/bin/sh
+set -eu
+umask 077
+LC_ALL=C; export LC_ALL
+
+COMMAND=$(basename "$0")
+SOURCE=$0
+while [ -L "$SOURCE" ]; do
+  DIR=$(CDPATH= cd -P "$(dirname "$SOURCE")" && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  case "$SOURCE" in /*) ;; *) SOURCE=$DIR/$SOURCE ;; esac
+done
+BASE=$(CDPATH= cd -P "$(dirname "$SOURCE")/.." && pwd)
+CONFIG=${REMOTE_JOB_CONFIG:-$BASE/config}
+[ -f "$CONFIG" ] || { echo "remote-job: missing config: $CONFIG" >&2; exit 1; }
+WORK_ROOT=$(sed -n 's/^WORK_ROOT=//p' "$CONFIG" | sed -n '1p')
+[ -n "$WORK_ROOT" ] || { echo "remote-job: WORK_ROOT is not configured" >&2; exit 1; }
+REQUESTS=$WORK_ROOT/.remote/requests
+STATUSES=$WORK_ROOT/.remote/status
+CANCEL=$WORK_ROOT/.remote/cancel
+STALE_AFTER=180
+mkdir -p "$REQUESTS" "$STATUSES" "$CANCEL"
+
+field() { sed -n "s/^$2=//p" "$1" | sed -n '1p'; }
+
+effective_state() {
+  file=$1; state=$(field "$file" state)
+  case "$state" in
+    running|cancelling)
+      heartbeat=$(field "$file" heartbeat_epoch)
+      case "$heartbeat" in
+        ''|*[!0-9]*) printf 'stale\n'; return ;;
+      esac
+      now=$(date +%s)
+      if awk -v now="$now" -v heartbeat="$heartbeat" -v limit="$STALE_AFTER" \
+          'BEGIN { exit !((now - heartbeat) > limit) }'; then
+        printf 'stale\n'
+      else printf '%s\n' "$state"; fi ;;
+    *) printf '%s\n' "$state" ;;
+  esac
+}
+
+display_status() {
+  file=$1; reported=$(field "$file" state); shown=$(effective_state "$file")
+  if [ "$shown" = stale ]; then
+    awk -v reported="$reported" '/^state=/{print "state=stale"; print "reported_state=" reported; next} {print}' "$file"
+  else cat "$file"; fi
+}
+
+valid_project() {
+  case "$1" in ''|/*|..|../*|*/../*|*/..) return 1 ;; *) return 0 ;; esac
+}
+
+normalize_project() {
+  valid_project "$1" || return 1
+  root_real=$(CDPATH= cd -P "$WORK_ROOT" && pwd) || return 1
+  target_real=$(CDPATH= cd -P "$WORK_ROOT/$1" && pwd) || return 1
+  case "$target_real" in
+    "$root_real") printf '.\n' ;;
+    "$root_real"/*) printf '%s\n' "${target_real#"$root_real"/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+current_project() {
+  root_real=$(CDPATH= cd -P "$WORK_ROOT" && pwd)
+  here=$(pwd -P)
+  case "$here" in
+    "$root_real") printf '.\n' ;;
+    "$root_real"/*) printf '%s\n' "${here#"$root_real"/}" ;;
+    *) echo "remote-job: current directory is outside WORK_ROOT" >&2; return 1 ;;
+  esac
+}
+
+submit() {
+  [ "$#" -le 1 ] || { echo "usage: submit-job [PROJECT]" >&2; exit 2; }
+  if [ "$#" -eq 1 ]; then input=$1; else input=$(current_project) || exit 2; fi
+  project=$(normalize_project "$input") || {
+    echo "submit-job: PROJECT must resolve inside WORK_ROOT and contain no '..'" >&2; exit 2
+  }
+  [ -x "$WORK_ROOT/$project/run" ] || { echo "submit-job: PROJECT/run is not executable" >&2; exit 2; }
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  tmp=$REQUESTS/.$id.tmp.$$
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  printf '%s\n' "$project" > "$tmp"
+  mv "$tmp" "$REQUESTS/$id.request"
+  trap - EXIT HUP INT TERM
+  printf '%s\n' "$id"
+}
+
+show_one() {
+  id=$1
+  case "$id" in ''|*[!A-Za-z0-9-]*) echo "job-status: invalid job id" >&2; exit 2 ;; esac
+  if [ -f "$STATUSES/$id.status" ]; then
+    display_status "$STATUSES/$id.status"
+    [ ! -f "$STATUSES/$id.log" ] || printf 'log=%s\n' "$STATUSES/$id.log"
+  elif [ -f "$REQUESTS/$id.request" ]; then
+    printf 'state=queued\nid=%s\nproject=%s\n' "$id" "$(sed -n '1p' "$REQUESTS/$id.request")"
+  else
+    echo "job-status: unknown job: $id" >&2; exit 1
+  fi
+}
+
+list_jobs() {
+  found=0
+  for file in "$STATUSES"/*.status; do
+    [ -e "$file" ] || continue
+    id=$(basename "$file" .status)
+    case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+    found=1; state=$(effective_state "$file")
+    printf '%s %s\n' "$id" "$state"
+  done
+  for file in "$REQUESTS"/*.request; do
+    [ -e "$file" ] || continue
+    id=$(basename "$file" .request)
+    [ -f "$STATUSES/$id.status" ] && continue
+    found=1; printf '%s queued\n' "$id"
+  done
+  [ "$found" -eq 1 ] || echo "No jobs."
+}
+
+job_list() {
+  [ "$#" -eq 0 ] || { echo "usage: job-list" >&2; exit 2; }
+  {
+    for file in "$STATUSES"/*.status; do
+      [ -e "$file" ] || continue
+      id=$(basename "$file" .status)
+      case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+      printf '%s\t%s\t%s\t%s\n' "$(field "$file" updated)" "$(field "$file" project)" \
+        "$(effective_state "$file")" "$id"
+    done
+  } | sort -r | awk -F '\t' '
+    BEGIN { printf "%-28s %-11s %-53s %s\n", "DIR", "STATE", "REQUEST", "UPDATED" }
+    { stamp=substr($1,1,16); gsub(/T/, " ", stamp); printf "%-28s %-11s %-53s %s\n", $2, $3, $4, stamp }
+  '
+}
+
+current_job() {
+  project=$(current_project) || return 1
+  best=; best_state=; best_priority=0
+  for file in "$STATUSES"/*.status; do
+    [ -e "$file" ] || continue
+    [ "$(sed -n 's/^project=//p' "$file" | sed -n '1p')" = "$project" ] || continue
+    id=$(basename "$file" .status)
+    case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+    state=$(effective_state "$file")
+    case "$state" in running|cancelling|stale) priority=3 ;; queued) priority=2 ;; *) priority=1 ;; esac
+    if [ "$priority" -gt "$best_priority" ] || { [ "$priority" -eq "$best_priority" ] && { [ -z "$best" ] || [ "$id" \> "$best" ]; }; }; then
+      best=$id; best_state=$state; best_priority=$priority
+    fi
+  done
+  for file in "$REQUESTS"/*.request; do
+    [ -e "$file" ] || continue
+    [ "$(sed -n '1p' "$file")" = "$project" ] || continue
+    id=$(basename "$file" .request)
+    case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+    if [ -f "$STATUSES/$id.status" ]; then
+      state=$(effective_state "$STATUSES/$id.status")
+    else state=queued; fi
+    case "$state" in running|cancelling|stale) priority=3 ;; queued) priority=2 ;; *) priority=1 ;; esac
+    if [ "$priority" -gt "$best_priority" ] || { [ "$priority" -eq "$best_priority" ] && { [ -z "$best" ] || [ "$id" \> "$best" ]; }; }; then
+      best=$id; best_state=$state; best_priority=$priority
+    fi
+  done
+  [ -n "$best" ] || { echo "job-cancel: no job found for $project" >&2; return 1; }
+  printf '%s %s\n' "$best" "$best_state"
+}
+
+cancel_job() {
+  [ "$#" -eq 0 ] || { echo "usage: job-cancel" >&2; exit 2; }
+  info=$(current_job) || exit 1
+  id=${info%% *}; state=${info#* }
+  case "$state" in
+    queued|running|cancelling|stale)
+      if [ ! -f "$CANCEL/$id.cancel" ]; then
+        tmp=$CANCEL/.$id.tmp.$$
+        trap 'rm -f "$tmp"' EXIT HUP INT TERM
+        printf '%s\n' "$id" > "$tmp"
+        mv "$tmp" "$CANCEL/$id.cancel"
+        trap - EXIT HUP INT TERM
+      fi
+      printf 'cancel requested: %s (%s)\n' "$id" "$state" ;;
+    finished|error|cancelled)
+      printf 'no action: %s is already %s\n' "$id" "$state" ;;
+    *) echo "job-cancel: unknown state: $state" >&2; exit 1 ;;
+  esac
+}
+
+case "$COMMAND" in
+  submit-job) submit "$@" ;;
+  job-status) if [ "$#" -eq 0 ]; then list_jobs; elif [ "$#" -eq 1 ]; then show_one "$1"; else echo "usage: job-status [JOB_ID]" >&2; exit 2; fi ;;
+  job-list) job_list "$@" ;;
+  job-cancel) cancel_job "$@" ;;
+  *) echo "invoke as submit-job, job-status, job-list, or job-cancel" >&2; exit 2 ;;
+esac

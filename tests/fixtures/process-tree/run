@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+trap '' TERM
+printf '%s\n' "$$" > leader.pid
+./child &
+wait
