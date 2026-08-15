@@ -39,7 +39,7 @@ assert_dead() {
 }
 
 # Existing submit/status/worker behavior and a harmless cancel after completion.
-normal_id=$($TMP/submit-job projects/example)
+normal_id=$(cd "$WORK/projects/example" && "$TMP/submit-job")
 $TMP/job-status "$normal_id" | grep -q '^state=queued$'
 "$WORKER" --config "$PREFIX/config"
 state_is "$normal_id" finished
@@ -48,12 +48,12 @@ state_is "$normal_id" finished
 [ ! -f "$WORK/.remote/cancel/$normal_id.cancel" ]
 
 # A nonzero ./run remains a distinct error state.
-error_id=$($TMP/submit-job projects/error)
+error_id=$(cd "$WORK/projects/error" && "$TMP/submit-job")
 "$WORKER" --config "$PREFIX/config"
 state_is "$error_id" error
 
 # Queued cancellation must prevent ./run from starting and remove its request.
-queued_id=$($TMP/submit-job projects/marker)
+queued_id=$(cd "$WORK/projects/marker" && "$TMP/submit-job")
 (cd "$WORK/projects/marker" && $TMP/job-cancel) | grep -q "$queued_id"
 "$WORKER" --config "$PREFIX/config"
 state_is "$queued_id" cancelled
@@ -63,14 +63,14 @@ state_is "$queued_id" cancelled
 # Reappearing stale cancellation is tied to its old ID; a new job still finishes.
 printf '%s\n' "$queued_id" > "$WORK/.remote/cancel/$queued_id.cancel"
 printf '%s\n' "$queued_id" > "$WORK/.remote/cancel/$queued_id (conflicted copy).cancel"
-next_id=$($TMP/submit-job projects/marker)
+next_id=$(cd "$WORK/projects/marker" && "$TMP/submit-job")
 "$WORKER" --config "$PREFIX/config"
 state_is "$next_id" finished
 [ -f "$WORK/projects/marker/started" ]
 [ ! -e "$WORK/.remote/cancel/$queued_id.cancel" ]
 
 # A running process tree ignores TERM, forcing the worker's group-wide KILL path.
-tree_id=$($TMP/submit-job projects/process-tree)
+tree_id=$(cd "$WORK/projects/process-tree" && "$TMP/submit-job")
 "$WORKER" --config "$PREFIX/config" &
 worker_pid=$!
 wait_state "$tree_id" running
@@ -89,16 +89,17 @@ state_is "$tree_id" cancelled
 assert_dead "$leader"; assert_dead "$child"; assert_dead "$grandchild"
 
 # A later submission after running cancellation remains unaffected.
-after_id=$($TMP/submit-job projects/example)
+after_id=$(cd "$WORK/projects/example" && "$TMP/submit-job")
 "$WORKER" --config "$PREFIX/config"
 state_is "$after_id" finished
 
-# Existing path and symlink containment checks remain enforced.
-if $TMP/submit-job ../outside >/dev/null 2>&1; then echo "accepted .. path" >&2; exit 1; fi
+# Submission accepts no project argument and must be run in the project directory.
+if "$TMP/submit-job" ../outside >/dev/null 2>&1; then echo "accepted project argument" >&2; exit 1; fi
 mkdir -p "$TMP/outside"
+if (cd "$TMP/outside" && "$TMP/submit-job") >/dev/null 2>&1; then echo "accepted directory outside WORK_ROOT" >&2; exit 1; fi
 cp -R "$ROOT/example-project/." "$TMP/outside/"
 ln -s "$TMP/outside" "$WORK/escape"
-if $TMP/submit-job escape >/dev/null 2>&1; then echo "accepted escaping symlink" >&2; exit 1; fi
+if (cd "$WORK/escape" && "$TMP/submit-job") >/dev/null 2>&1; then echo "accepted escaping symlink" >&2; exit 1; fi
 printf 'escape\n' > "$WORK/.remote/requests/symlink-escape.request"
 "$WORKER" --config "$PREFIX/config"
 state_is symlink-escape error

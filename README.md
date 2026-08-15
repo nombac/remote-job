@@ -1,8 +1,8 @@
 # remote-job
 
-ローカルにマウントされた同期フォルダを共有する2台のMac向けの、コンパクトなmacOS専用リモートジョブキューです。特定のプロジェクトや同期サービスには依存しません。両方のMacに同じ `WORK_ROOT` ツリーがローカルに存在していれば、Dropbox、OneDrive、Google Drive、ファイルサーバー、その他のサービスを利用できます。
+`remote-job` は、一方のMacから、もう一方のMacにプロジェクトの処理を実行させるためのツールです。ここで「ジョブ」とは、現在のプロジェクトディレクトリにある `./run` をワーカー側のMacで1回実行する依頼を指します。
 
-クライアントは、`WORK_ROOT/.remote` 以下に小さなリクエストファイルまたはキャンセルファイルを書き込みます。`launchd` によって30秒ごとに起動されるSwift製ワーカーが、選択されたプロジェクトの実行ファイル `./run` を実行し、キャンセルを監視しながら、実行中のステータス・ハートビートをアトミックに更新します。Swift/Xcode Command Line Toolsが必要なのはワーカー側のMacだけです。
+対象プロジェクトのディレクトリで `submit-job` を実行すると、同期フォルダを通じて実行依頼が送られ、ワーカー側のMacが同じプロジェクトの `./run` を実行します。依頼後は、実行状況とログの確認や処理のキャンセルができます。Mac間の通信にはDropbox、OneDrive、Google Drive、ファイルサーバーなどを利用でき、専用サーバーやネットワーク設定は不要です。
 
 ## 必要条件と構成
 
@@ -74,24 +74,16 @@ job-list
 job-cancel
 ```
 
-プロジェクトのパスは、常に `WORK_ROOT` からの相対パスで指定します：
-
-```sh
-job_id=$(submit-job simulations/case-01)
-job-status "$job_id"
-job-list                         # ステータスに基づくジョブ一覧（新しい順）
-```
-
-`WORK_ROOT` 以下のプロジェクト内で実行する場合は、引数を省略できます：
+ジョブを投入するには、対象プロジェクトのディレクトリへ移動して、引数なしで `submit-job` を実行します：
 
 ```sh
 cd "$HOME/Dropbox/Work/simulations/case-01"
 job_id=$(submit-job)
 job-status "$job_id"
-job-cancel                    # このプロジェクトで現在アクティブなジョブをキャンセル
+job-list                         # ステータスに基づくジョブ一覧（新しい順）
 ```
 
-`job-cancel` は引数を取らず、対象プロジェクトのディレクトリ内で実行する必要があります。そのプロジェクトで実行中のジョブを優先し、なければ最新の待機中ジョブを選択します。最新のジョブがすでに終了状態にある場合に呼び出しても、安全に何も行いません。
+`submit-job` と `job-cancel` は引数を取らず、どちらも対象プロジェクトのディレクトリ内で実行する必要があります。`job-cancel` はそのプロジェクトで実行中のジョブを優先し、なければ最新の待機中ジョブを選択します。最新のジョブがすでに終了状態にある場合に呼び出しても、安全に何も行いません。`job-status <request-id>` と `job-list` は任意のディレクトリから実行できます。
 
 表示される状態は `queued`、`running`、`cancelling`、`cancelled`、`finished`、`error`、`stale` のいずれかです。詳細ステータスコマンドでは、利用可能な場合にワーカー側のログパスも表示されます。そのログは `.remote/status/<job-id>.log` に同期されます。
 
@@ -109,7 +101,7 @@ CCC/DDD                      error       20260815T084200Z-...                   
 長時間実行する場合の典型的な流れは次のとおりです：
 
 ```text
-Mac B：長時間ジョブを開始
+Mac B：対象プロジェクトのディレクトリでsubmit-job
   ↓
 ワーカー側のMacを起動したまま帰宅
   ↓
@@ -119,13 +111,13 @@ Mac A：job-status <request-id>
   ↓
 Mac A：job-cancel（必要な場合、プロジェクトのディレクトリから）
   ↓
-完了後：次のジョブをsubmit-jobで投入
+完了後：対象プロジェクトのディレクトリで次のジョブをsubmit-job
 ```
 
 Mac Bで長時間ジョブを開始し、その後Mac Aから監視またはキャンセルする場合：
 
 ```text
-Mac B：submit-job
+Mac B：対象プロジェクトのディレクトリでsubmit-job
   ↓
 Mac A：job-status
   ↓
@@ -135,7 +127,7 @@ Mac A：job-cancel（必要な場合、同じプロジェクトのディレク�
 または、Mac Aからリモートで投入し、Mac Bのワーカーに実行させます：
 
 ```text
-Mac A：submit-job
+Mac A：対象プロジェクトのディレクトリでsubmit-job
   ↓
 Mac B：ワーカーが./runを実行
   ↓
@@ -146,7 +138,8 @@ Mac A：job-status / job-cancel
 
 ```sh
 # Mac A
-id=$(submit-job my-project)
+cd "$HOME/Dropbox/Work/my-project"
+id=$(submit-job)
 job-status "$id"       # queued → running → finished/error
 ```
 

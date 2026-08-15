@@ -47,21 +47,6 @@ display_status() {
   else cat "$file"; fi
 }
 
-valid_project() {
-  case "$1" in ''|/*|..|../*|*/../*|*/..) return 1 ;; *) return 0 ;; esac
-}
-
-normalize_project() {
-  valid_project "$1" || return 1
-  root_real=$(CDPATH= cd -P "$WORK_ROOT" && pwd) || return 1
-  target_real=$(CDPATH= cd -P "$WORK_ROOT/$1" && pwd) || return 1
-  case "$target_real" in
-    "$root_real") printf '.\n' ;;
-    "$root_real"/*) printf '%s\n' "${target_real#"$root_real"/}" ;;
-    *) return 1 ;;
-  esac
-}
-
 current_project() {
   root_real=$(CDPATH= cd -P "$WORK_ROOT" && pwd)
   here=$(pwd -P)
@@ -73,12 +58,11 @@ current_project() {
 }
 
 submit() {
-  [ "$#" -le 1 ] || { echo "usage: submit-job [PROJECT]" >&2; exit 2; }
-  if [ "$#" -eq 1 ]; then input=$1; else input=$(current_project) || exit 2; fi
-  project=$(normalize_project "$input") || {
-    echo "submit-job: PROJECT must resolve inside WORK_ROOT and contain no '..'" >&2; exit 2
+  [ "$#" -eq 0 ] || { echo "usage: submit-job" >&2; exit 2; }
+  project=$(current_project) || exit 2
+  [ -x "$WORK_ROOT/$project/run" ] || {
+    echo "submit-job: current directory does not contain executable ./run" >&2; exit 2
   }
-  [ -x "$WORK_ROOT/$project/run" ] || { echo "submit-job: PROJECT/run is not executable" >&2; exit 2; }
   id="$(date -u +%Y%m%dT%H%M%SZ)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
   tmp=$REQUESTS/.$id.tmp.$$
   trap 'rm -f "$tmp"' EXIT HUP INT TERM
