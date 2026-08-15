@@ -103,10 +103,10 @@ current_project() {
 }
 
 submit() {
-  [ "$#" -eq 0 ] || { echo "usage: submit-job" >&2; exit 2; }
+  [ "$#" -eq 0 ] || { echo "usage: job-submit" >&2; exit 2; }
   project=$(current_project) || exit 2
   [ -x "$WORK_ROOT/$project/run" ] || {
-    echo "submit-job: current directory does not contain executable ./run" >&2; exit 2
+    echo "job-submit: current directory does not contain executable ./run" >&2; exit 2
   }
   id="$(TZ=Asia/Tokyo /bin/date +%Y%m%dT%H%M%SJST)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
   tmp=$REQUESTS/.$id.tmp.$$
@@ -212,9 +212,9 @@ cancel_job() {
 }
 
 case "$COMMAND" in
-  submit-job) submit "$@" ;;
+  job-submit) submit "$@" ;;
   job-status) [ "$#" -eq 1 ] || { echo "usage: job-status JOB_ID" >&2; exit 2; }; show_one "$1" ;;
   job-list) job_list "$@" ;;
   job-cancel) cancel_job "$@" ;;
-  *) echo "invoke as submit-job, job-status, job-list, or job-cancel" >&2; exit 2 ;;
+  *) echo "invoke as job-submit, job-status, job-list, or job-cancel" >&2; exit 2 ;;
 esac

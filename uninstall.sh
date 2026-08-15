@@ -19,7 +19,7 @@ fi
 PLIST=$HOME/Library/LaunchAgents/com.local.remote-job.worker.plist
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 rm -f "$PLIST"
-for name in submit-job job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel submit-job; do
   link=$HOME/.local/bin/$name
   [ ! -L "$link" ] || { [ "$(readlink "$link")" != "$PREFIX/bin/remote-job" ] || rm -f "$link"; }
 done

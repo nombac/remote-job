@@ -19,23 +19,27 @@ if HOME="$TEST_HOME" PATH="$TMP/fail-bin:$PATH" \
 fi
 [ ! -e "$PREFIX/bin/remote-job" ]
 [ ! -e "$PREFIX/config" ]
-[ ! -e "$TEST_HOME/.local/bin/submit-job" ]
+[ ! -e "$TEST_HOME/.local/bin/job-submit" ]
 
 # Client installation and reinstallation produce the complete expected layout.
+mkdir -p "$TEST_HOME/.local/bin" "$PREFIX/bin"
+legacy_prefix=$(CDPATH= cd -P "$PREFIX" && pwd)
+ln -s "$legacy_prefix/bin/remote-job" "$TEST_HOME/.local/bin/submit-job"
 HOME="$TEST_HOME" "$ROOT/install.sh" client --work-root "$WORK" --prefix "$PREFIX" >/dev/null
 HOME="$TEST_HOME" "$ROOT/install.sh" client --work-root "$WORK" --prefix "$PREFIX" >/dev/null
 [ -x "$PREFIX/bin/remote-job" ]
 configured_root=$(sed -n 's/^WORK_ROOT=//p' "$PREFIX/config")
 [ "$configured_root" = "$(CDPATH= cd -P "$WORK" && pwd)" ]
 installed_prefix=$(CDPATH= cd -P "$PREFIX" && pwd)
-for name in submit-job job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel; do
   [ "$(readlink "$TEST_HOME/.local/bin/$name")" = "$installed_prefix/bin/remote-job" ]
 done
+[ ! -L "$TEST_HOME/.local/bin/submit-job" ]
 
 HOME="$TEST_HOME" "$ROOT/uninstall.sh" --prefix "$PREFIX" >/dev/null
 [ ! -e "$PREFIX/bin/remote-job" ]
 [ ! -e "$PREFIX/config" ]
-for name in submit-job job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel; do
   [ ! -e "$TEST_HOME/.local/bin/$name" ]
 done
 

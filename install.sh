@@ -42,7 +42,7 @@ check_link() {
   dest=$1
   if [ -e "$dest" ] && [ ! -L "$dest" ]; then echo "refusing to replace $dest" >&2; exit 1; fi
 }
-for name in submit-job job-status job-list job-cancel; do check_link "$HOME/.local/bin/$name"; done
+for name in job-submit job-status job-list job-cancel; do check_link "$HOME/.local/bin/$name"; done
 [ "$ROLE" != worker ] || check_link "$HOME/.local/bin/job-worker"
 
 if [ "$ROLE" = worker ]; then
@@ -73,9 +73,13 @@ printf 'WORK_ROOT=%s\n' "$WORK_ROOT" > "$INSTALL_TMP"
 chmod 600 "$INSTALL_TMP"
 mv "$INSTALL_TMP" "$PREFIX/config"
 INSTALL_TMP=
-for name in submit-job job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel; do
   ln -sfn "$PREFIX/bin/remote-job" "$HOME/.local/bin/$name"
 done
+LEGACY_LINK=$HOME/.local/bin/submit-job
+[ ! -L "$LEGACY_LINK" ] || {
+  [ "$(readlink "$LEGACY_LINK")" != "$PREFIX/bin/remote-job" ] || rm -f "$LEGACY_LINK"
+}
 
 if [ "$ROLE" = worker ]; then
   atomic_install "$BUILD_DIR/remote-job-worker" "$PREFIX/bin/remote-job-worker" 755
@@ -89,6 +93,6 @@ if [ "$ROLE" = worker ]; then
 else
   echo "Client installed."
 fi
-echo "Add $HOME/.local/bin to PATH, then use submit-job, job-status, job-list, and job-cancel."
+echo "Add $HOME/.local/bin to PATH, then use job-submit, job-status, job-list, and job-cancel."
 cleanup
 trap - EXIT HUP INT TERM
