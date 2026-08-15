@@ -13,7 +13,8 @@ printf 'WORK_ROOT=%s\n' "$WORK" > "$PREFIX/config"
 for name in job-status job-list; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
 
 # An empty/missing status directory is harmless and still prints the header.
-$TMP/job-list | grep -q '^DIR.*STATE.*REQUEST.*UPDATED$'
+$TMP/job-list | grep -q '^DIR.*STATE.*REQUEST.*UPDATED (JST)$'
+if "$TMP/job-status" >/dev/null 2>&1; then echo "job-status accepted a missing job ID" >&2; exit 1; fi
 
 now=$(date +%s)
 write_status() {
@@ -30,7 +31,8 @@ write_status error-job error EEE 2026-08-15T08:42:00Z ''
 write_status cancel-job cancelled FFF 2026-08-15T08:00:00Z 1
 write_status queued-job queued GGG 2026-08-15T07:30:00Z ''
 write_status cancelling-job cancelling HHH 2026-08-15T07:00:00Z "$now"
-printf 'AAA\n' > "$WORK/.remote/requests/queued-without-status.request"
+queued_id=20260815T071500Z-queued-without-status
+printf 'QUEUED\n' > "$WORK/.remote/requests/$queued_id.request"
 
 list=$($TMP/job-list)
 printf '%s\n' "$list" | sed -n '2p' | grep -q 'AAA.*running.*newest-running'
@@ -40,9 +42,11 @@ printf '%s\n' "$list" | grep -q 'EEE.*error.*error-job'
 printf '%s\n' "$list" | grep -q 'FFF.*cancelled.*cancel-job'
 printf '%s\n' "$list" | grep -q 'GGG.*queued.*queued-job'
 printf '%s\n' "$list" | grep -q 'HHH.*cancelling.*cancelling-job'
-if printf '%s\n' "$list" | grep -q queued-without-status; then echo "job-list included request without status" >&2; exit 1; fi
+printf '%s\n' "$list" | grep -q "QUEUED.*queued.*$queued_id.*2026-08-15 16:15 JST"
 
 $TMP/job-status newest-running | grep -q '^state=running$'
+$TMP/job-status newest-running | grep -q '^updated=2026-08-15T19:31:00+09:00$'
+$TMP/job-status "$queued_id" | grep -q '^updated=2026-08-15T16:15:00+09:00$'
 $TMP/job-status old-running | grep -q '^state=stale$'
 $TMP/job-status old-running | grep -q '^reported_state=running$'
 $TMP/job-status done-job | grep -q '^state=finished$'

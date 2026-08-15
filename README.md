@@ -80,20 +80,20 @@ job-cancel
 cd "$HOME/Dropbox/Work/simulations/case-01"
 job_id=$(submit-job)
 job-status "$job_id"
-job-list                         # ステータスに基づくジョブ一覧（新しい順）
+job-list                         # 待機中を含むジョブ一覧（新しい順）
 ```
 
 `submit-job` と `job-cancel` は引数を取らず、どちらも対象プロジェクトのディレクトリ内で実行する必要があります。`job-cancel` はそのプロジェクトで実行中のジョブを優先し、なければ最新の待機中ジョブを選択します。最新のジョブがすでに終了状態にある場合に呼び出しても、安全に何も行いません。`job-status <request-id>` と `job-list` は任意のディレクトリから実行できます。
 
-表示される状態は `queued`、`running`、`cancelling`、`cancelled`、`finished`、`error`、`stale` のいずれかです。詳細ステータスコマンドでは、利用可能な場合にワーカー側のログパスも表示されます。そのログは `.remote/status/<job-id>.log` に同期されます。
+表示される状態は `queued`、`running`、`cancelling`、`cancelled`、`finished`、`error`、`stale` のいずれかです。`job-status` には必ずリクエストIDを指定します。詳細ステータスでは、利用可能な場合にワーカー側のログパスも表示されます。そのログは `.remote/status/<job-id>.log` に同期されます。
 
-`job-list` は `.remote/status/*.status` だけを読み取ります（履歴データベースはありません）。ステータス内の `updated` タイムスタンプを基準に、新しい順で並べます：
+`job-list` は `.remote/status/*.status` と、まだステータスのない待機中リクエストを読み取ります（履歴データベースはありません）。更新時刻を基準に、新しい順で並べます。表示時刻はすべてJSTです。旧バージョンがUTCで記録したステータスもJSTへ変換して表示します：
 
 ```text
-DIR                          STATE       REQUEST                                               UPDATED
-AAA                          running     20260815T103100Z-...                                   2026-08-15 10:31
-BBB                          finished    20260815T091500Z-...                                   2026-08-15 09:15
-CCC/DDD                      error       20260815T084200Z-...                                   2026-08-15 08:42
+DIR                          STATE       REQUEST                                               UPDATED (JST)
+AAA                          running     20260815T193100JST-...                                 2026-08-15 19:31 JST
+BBB                          finished    20260815T181500JST-...                                 2026-08-15 18:15 JST
+CCC/DDD                      error       20260815T174200JST-...                                 2026-08-15 17:42 JST
 ```
 
 ### 典型的なリモートワークフロー
@@ -119,7 +119,7 @@ Mac Bで長時間ジョブを開始し、その後Mac Aから監視またはキ�
 ```text
 Mac B：対象プロジェクトのディレクトリでsubmit-job
   ↓
-Mac A：job-status
+Mac A：job-status <request-id>
   ↓
 Mac A：job-cancel（必要な場合、同じプロジェクトのディレクトリから）
 ```
@@ -131,7 +131,7 @@ Mac A：対象プロジェクトのディレクトリでsubmit-job
   ↓
 Mac B：ワーカーが./runを実行
   ↓
-Mac A：job-status / job-cancel
+Mac A：job-status <request-id> / job-cancel
 ```
 
 ジョブは、次の30秒間隔のアイドルポーリング後にMac Bで開始されます。ステータス、ログ、キャンセルリクエストは、通常の同期フォルダを介してMac間を移動します。
@@ -207,6 +207,7 @@ tests/list-stale.sh
 tests/heartbeat.sh
 tests/integration.sh
 tests/worker-lock.sh
+tests/install-client.sh
 ```
 
 ワーカーはキューを1回スキャンし、通常は1件のジョブを処理した後に終了します。そのジョブの実行中は、ID固有のキャンセルファイルを監視するために動作し続けます。`launchd` が30秒間隔のアイドルポーリングを提供し、同じLaunchAgentのインスタンスが重複して動作するのを防ぎます。

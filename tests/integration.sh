@@ -40,9 +40,11 @@ assert_dead() {
 
 # Existing submit/status/worker behavior and a harmless cancel after completion.
 normal_id=$(cd "$WORK/projects/example" && "$TMP/submit-job")
+case "$normal_id" in ????????T??????JST-*) ;; *) echo "job ID is not JST: $normal_id" >&2; exit 1 ;; esac
 $TMP/job-status "$normal_id" | grep -q '^state=queued$'
 "$WORKER" --config "$PREFIX/config"
 state_is "$normal_id" finished
+grep -q '^updated=.*+09:00$' "$WORK/.remote/status/$normal_id.status"
 [ -f "$WORK/projects/example/result.txt" ]
 (cd "$WORK/projects/example" && $TMP/job-cancel) | grep -q 'already finished'
 [ ! -f "$WORK/.remote/cancel/$normal_id.cancel" ]
@@ -104,5 +106,8 @@ printf 'escape\n' > "$WORK/.remote/requests/symlink-escape.request"
 "$WORKER" --config "$PREFIX/config"
 state_is symlink-escape error
 grep -q 'outside WORK_ROOT' "$WORK/.remote/status/symlink-escape.status"
+printf 'projects/example\n' > "$WORK/.remote/requests/日本語.request"
+"$WORKER" --config "$PREFIX/config"
+[ ! -e "$WORK/.remote/status/日本語.status" ]
 
 echo "integration test passed"

@@ -7,8 +7,13 @@ enum JobError: Error, CustomStringConvertible {
 }
 
 let fm = FileManager.default
-let iso = ISO8601DateFormatter()
+let jstISO8601: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    return formatter
+}()
 let heartbeatInterval: TimeInterval = 20
+let validIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
 
 func configValue(_ path: String) throws -> String {
     let text = try String(contentsOfFile: path, encoding: .utf8)
@@ -43,14 +48,14 @@ func safeTarget(root: URL, relative: String) throws -> URL {
 }
 
 func status(_ state: String, id: String, project: String, detail: String = "", heartbeat: Bool = false) -> String {
-    var lines = ["state=\(state)", "id=\(id)", "project=\(project)", "updated=\(iso.string(from: Date()))"]
+    var lines = ["state=\(state)", "id=\(id)", "project=\(project)", "updated=\(jstISO8601.string(from: Date()))"]
     if heartbeat { lines.append("heartbeat_epoch=\(Int(Date().timeIntervalSince1970))") }
     if !detail.isEmpty { lines.append(detail.replacingOccurrences(of: "\n", with: " ")) }
     return lines.joined(separator: "\n") + "\n"
 }
 
 func validID(_ id: String) -> Bool {
-    !id.isEmpty && id.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+    !id.isEmpty && id.unicodeScalars.allSatisfy(validIDCharacters.contains)
 }
 
 func cancelRequested(id: String, cancelDir: URL) -> Bool {

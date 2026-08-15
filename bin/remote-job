@@ -21,13 +21,52 @@ CANCEL=$WORK_ROOT/.remote/cancel
 STALE_AFTER=180
 mkdir -p "$REQUESTS" "$STATUSES" "$CANCEL"
 
-field() { sed -n "s/^$2=//p" "$1" | sed -n '1p'; }
+parse_status() {
+  awk '
+    /^state=/ && !have_state { state=substr($0, 7); have_state=1 }
+    /^heartbeat_epoch=/ && !have_heartbeat { heartbeat=substr($0, 17); have_heartbeat=1 }
+    /^updated=/ && !have_updated { updated=substr($0, 9); have_updated=1 }
+    /^project=/ && !have_project { project=substr($0, 9); have_project=1 }
+    END { print state; print heartbeat; print updated; print project }
+  '
+}
+
+parsed_value() { printf '%s\n' "$1" | sed -n "${2}p"; }
+
+jst_timestamp() {
+  stamp=$1
+  case "$stamp" in
+    *Z)
+      epoch=$(TZ=UTC /bin/date -j -f '%Y-%m-%dT%H:%M:%SZ' "$stamp" +%s 2>/dev/null) || {
+        printf '%s\n' "$stamp"; return
+      }
+      TZ=Asia/Tokyo /bin/date -r "$epoch" '+%Y-%m-%dT%H:%M:%S+09:00' ;;
+    *) printf '%s\n' "$stamp" ;;
+  esac
+}
+
+request_updated() {
+  stamp=${1%%-*}
+  case "$stamp" in
+    ????????T??????JST)
+      printf '%s\n' "${stamp%JST}" | awk '{
+        printf "%s-%s-%sT%s:%s:%s+09:00\n", substr($0,1,4), substr($0,5,2),
+          substr($0,7,2), substr($0,10,2), substr($0,12,2), substr($0,14,2)
+      }' ;;
+    ????????T??????Z)
+      epoch=$(TZ=UTC /bin/date -j -f '%Y%m%dT%H%M%SZ' "$stamp" +%s 2>/dev/null) || {
+        printf '\n'; return
+      }
+      TZ=Asia/Tokyo /bin/date -r "$epoch" '+%Y-%m-%dT%H:%M:%S+09:00' ;;
+    *) printf '\n' ;;
+  esac
+}
 
 effective_state() {
-  file=$1; state=$(field "$file" state)
+  parsed=$1; state=$(parsed_value "$parsed" 1)
   case "$state" in
     running|cancelling)
-      heartbeat=$(field "$file" heartbeat_epoch)
+      heartbeat=$(parsed_value "$parsed" 2)
       case "$heartbeat" in
         ''|*[!0-9]*) printf 'stale\n'; return ;;
       esac
@@ -41,10 +80,16 @@ effective_state() {
 }
 
 display_status() {
-  file=$1; reported=$(field "$file" state); shown=$(effective_state "$file")
-  if [ "$shown" = stale ]; then
-    awk -v reported="$reported" '/^state=/{print "state=stale"; print "reported_state=" reported; next} {print}' "$file"
-  else cat "$file"; fi
+  text=$(cat "$1")
+  parsed=$(printf '%s\n' "$text" | parse_status)
+  reported=$(parsed_value "$parsed" 1)
+  shown=$(effective_state "$parsed")
+  updated=$(jst_timestamp "$(parsed_value "$parsed" 3)")
+  printf '%s\n' "$text" | awk -v shown="$shown" -v reported="$reported" -v updated="$updated" '
+    /^state=/ { print "state=" shown; if (shown == "stale") print "reported_state=" reported; next }
+    /^updated=/ { print "updated=" updated; next }
+    { print }
+  '
 }
 
 current_project() {
@@ -63,7 +108,7 @@ submit() {
   [ -x "$WORK_ROOT/$project/run" ] || {
     echo "submit-job: current directory does not contain executable ./run" >&2; exit 2
   }
-  id="$(date -u +%Y%m%dT%H%M%SZ)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  id="$(TZ=Asia/Tokyo /bin/date +%Y%m%dT%H%M%SJST)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
   tmp=$REQUESTS/.$id.tmp.$$
   trap 'rm -f "$tmp"' EXIT HUP INT TERM
   printf '%s\n' "$project" > "$tmp"
@@ -80,27 +125,11 @@ show_one() {
     [ ! -f "$STATUSES/$id.log" ] || printf 'log=%s\n' "$STATUSES/$id.log"
   elif [ -f "$REQUESTS/$id.request" ]; then
     printf 'state=queued\nid=%s\nproject=%s\n' "$id" "$(sed -n '1p' "$REQUESTS/$id.request")"
+    updated=$(request_updated "$id")
+    [ -z "$updated" ] || printf 'updated=%s\n' "$updated"
   else
     echo "job-status: unknown job: $id" >&2; exit 1
   fi
-}
-
-list_jobs() {
-  found=0
-  for file in "$STATUSES"/*.status; do
-    [ -e "$file" ] || continue
-    id=$(basename "$file" .status)
-    case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
-    found=1; state=$(effective_state "$file")
-    printf '%s %s\n' "$id" "$state"
-  done
-  for file in "$REQUESTS"/*.request; do
-    [ -e "$file" ] || continue
-    id=$(basename "$file" .request)
-    [ -f "$STATUSES/$id.status" ] && continue
-    found=1; printf '%s queued\n' "$id"
-  done
-  [ "$found" -eq 1 ] || echo "No jobs."
 }
 
 job_list() {
@@ -110,12 +139,23 @@ job_list() {
       [ -e "$file" ] || continue
       id=$(basename "$file" .status)
       case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
-      printf '%s\t%s\t%s\t%s\n' "$(field "$file" updated)" "$(field "$file" project)" \
-        "$(effective_state "$file")" "$id"
+      text=$(cat "$file")
+      parsed=$(printf '%s\n' "$text" | parse_status)
+      updated=$(jst_timestamp "$(parsed_value "$parsed" 3)")
+      printf '%s\t%s\t%s\t%s\n' "$updated" "$(parsed_value "$parsed" 4)" \
+        "$(effective_state "$parsed")" "$id"
+    done
+    for file in "$REQUESTS"/*.request; do
+      [ -e "$file" ] || continue
+      id=$(basename "$file" .request)
+      case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
+      [ -f "$STATUSES/$id.status" ] && continue
+      printf '%s\t%s\tqueued\t%s\n' "$(request_updated "$id")" "$(sed -n '1p' "$file")" "$id"
     done
   } | sort -r | awk -F '\t' '
-    BEGIN { printf "%-28s %-11s %-53s %s\n", "DIR", "STATE", "REQUEST", "UPDATED" }
-    { stamp=substr($1,1,16); gsub(/T/, " ", stamp); printf "%-28s %-11s %-53s %s\n", $2, $3, $4, stamp }
+    BEGIN { printf "%-28s %-11s %-53s %s\n", "DIR", "STATE", "REQUEST", "UPDATED (JST)" }
+    { stamp=substr($1,1,16); gsub(/T/, " ", stamp); if (stamp == "") stamp="-"; else stamp=stamp " JST";
+      printf "%-28s %-11s %-53s %s\n", $2, $3, $4, stamp }
   '
 }
 
@@ -124,10 +164,12 @@ current_job() {
   best=; best_state=; best_priority=0
   for file in "$STATUSES"/*.status; do
     [ -e "$file" ] || continue
-    [ "$(sed -n 's/^project=//p' "$file" | sed -n '1p')" = "$project" ] || continue
+    text=$(cat "$file")
+    parsed=$(printf '%s\n' "$text" | parse_status)
+    [ "$(parsed_value "$parsed" 4)" = "$project" ] || continue
     id=$(basename "$file" .status)
     case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
-    state=$(effective_state "$file")
+    state=$(effective_state "$parsed")
     case "$state" in running|cancelling|stale) priority=3 ;; queued) priority=2 ;; *) priority=1 ;; esac
     if [ "$priority" -gt "$best_priority" ] || { [ "$priority" -eq "$best_priority" ] && { [ -z "$best" ] || [ "$id" \> "$best" ]; }; }; then
       best=$id; best_state=$state; best_priority=$priority
@@ -138,9 +180,8 @@ current_job() {
     [ "$(sed -n '1p' "$file")" = "$project" ] || continue
     id=$(basename "$file" .request)
     case "$id" in ''|*[!A-Za-z0-9-]*) continue ;; esac
-    if [ -f "$STATUSES/$id.status" ]; then
-      state=$(effective_state "$STATUSES/$id.status")
-    else state=queued; fi
+    [ -f "$STATUSES/$id.status" ] && continue
+    state=queued
     case "$state" in running|cancelling|stale) priority=3 ;; queued) priority=2 ;; *) priority=1 ;; esac
     if [ "$priority" -gt "$best_priority" ] || { [ "$priority" -eq "$best_priority" ] && { [ -z "$best" ] || [ "$id" \> "$best" ]; }; }; then
       best=$id; best_state=$state; best_priority=$priority
@@ -172,7 +213,7 @@ cancel_job() {
 
 case "$COMMAND" in
   submit-job) submit "$@" ;;
-  job-status) if [ "$#" -eq 0 ]; then list_jobs; elif [ "$#" -eq 1 ]; then show_one "$1"; else echo "usage: job-status [JOB_ID]" >&2; exit 2; fi ;;
+  job-status) [ "$#" -eq 1 ] || { echo "usage: job-status JOB_ID" >&2; exit 2; }; show_one "$1" ;;
   job-list) job_list "$@" ;;
   job-cancel) cancel_job "$@" ;;
   *) echo "invoke as submit-job, job-status, job-list, or job-cancel" >&2; exit 2 ;;
