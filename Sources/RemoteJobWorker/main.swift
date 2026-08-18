@@ -91,6 +91,15 @@ func parseRequest(_ url: URL) throws -> JobRequest {
     return JobRequest(project: project, task: task)
 }
 
+func isTransientRequestReadError(_ error: Error) -> Bool {
+    var current = error as NSError
+    while true {
+        if current.domain == NSPOSIXErrorDomain && current.code == Int(EDEADLK) { return true }
+        guard let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError else { return false }
+        current = underlying
+    }
+}
+
 func cancelRequested(id: String, cancelDir: URL) -> Bool {
     let url = cancelDir.appendingPathComponent(id + ".cancel")
     guard let value = try? String(contentsOf: url, encoding: .utf8) else { return false }
@@ -304,10 +313,19 @@ func runOne(configPath: String) throws {
         let stateURL = statuses.appendingPathComponent(id + ".status")
         if fm.fileExists(atPath: stateURL.path) { continue }
         let requestURL = requests.appendingPathComponent(name)
-        var request: JobRequest? = nil
+        let parsedRequest: JobRequest
         do {
-            let parsedRequest = try parseRequest(requestURL)
-            request = parsedRequest
+            parsedRequest = try parseRequest(requestURL)
+        } catch let error where isTransientRequestReadError(error) {
+            let message = "remote-job-worker: request temporarily unavailable for \(id): \(error)\n"
+            FileHandle.standardError.write(message.data(using: .utf8)!)
+            return
+        } catch {
+            try atomicWrite(status("error", id: id, project: "invalid", task: "invalid",
+                                   detail: "error=\(error)"), to: stateURL)
+            return
+        }
+        do {
             let target = try safeTarget(root: root, relative: parsedRequest.project)
             let entry = target.appendingPathComponent("run")
             guard fm.isExecutableFile(atPath: entry.path) else { throw JobError.message("./run is not executable") }
@@ -315,8 +333,8 @@ func runOne(configPath: String) throws {
                         target: target, entry: entry,
                         statusURL: stateURL, requests: requests, cancelDir: cancelDir, statuses: statuses)
         } catch {
-            try atomicWrite(status("error", id: id, project: request?.project ?? "invalid",
-                                   task: request?.task ?? "invalid", detail: "error=\(error)"), to: stateURL)
+            try atomicWrite(status("error", id: id, project: parsedRequest.project,
+                                   task: parsedRequest.task, detail: "error=\(error)"), to: stateURL)
         }
         return
     }
