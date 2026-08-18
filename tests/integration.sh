@@ -86,6 +86,27 @@ done
 leader=$(sed -n '1p' "$WORK/projects/process-tree/leader.pid")
 child=$(sed -n '1p' "$WORK/projects/process-tree/child.pid")
 grandchild=$(sed -n '1p' "$WORK/projects/process-tree/grandchild.pid")
+
+# A stale cancellation is finalized only when its recorded process group is absent.
+stale_gone=stale-process-gone
+printf 'projects/example\n' > "$WORK/.remote/requests/$stale_gone.request"
+printf 'state=running\nid=%s\nproject=projects/example\nupdated=2026-08-18T00:00:00+09:00\nheartbeat_epoch=1\npgid=999999\n' \
+  "$stale_gone" > "$WORK/.remote/status/$stale_gone.status"
+$TMP/job-cancel "$stale_gone" | grep -q 'stale'
+wait_state "$stale_gone" cancelled
+
+# A stale status whose process group still exists is not finalized or terminated.
+stale_live=stale-process-live
+printf 'projects/example\n' > "$WORK/.remote/requests/$stale_live.request"
+printf 'state=running\nid=%s\nproject=projects/example\nupdated=2026-08-18T00:00:00+09:00\nheartbeat_epoch=1\npgid=%s\n' \
+  "$stale_live" "$leader" > "$WORK/.remote/status/$stale_live.status"
+$TMP/job-cancel "$stale_live" | grep -q 'stale'
+sleep 1.5
+state_is "$stale_live" running
+kill -0 "-$leader"
+rm -f "$WORK/.remote/requests/$stale_live.request" "$WORK/.remote/status/$stale_live.status" \
+  "$WORK/.remote/cancel/$stale_live.cancel"
+
 queued_while_running=$(cd "$WORK/projects/example" && "$TMP/job-submit")
 if $TMP/job-delete "$queued_while_running" >/dev/null 2>&1; then echo "deleted queued job" >&2; exit 1; fi
 $TMP/job-cancel "$queued_while_running" | grep -q "$queued_while_running"

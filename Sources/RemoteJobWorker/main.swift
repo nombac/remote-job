@@ -14,6 +14,7 @@ let jstISO8601: ISO8601DateFormatter = {
 }()
 let heartbeatInterval: TimeInterval = 20
 let queuedCancelInterval: TimeInterval = 1
+let staleAfter: TimeInterval = 180
 let validIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
 
 func configValue(_ path: String) throws -> String {
@@ -120,6 +121,43 @@ func processGroupExists(_ pgid: pid_t) -> Bool {
     kill(-pgid, 0) == 0 || errno == EPERM
 }
 
+func statusValue(_ key: String, text: String) -> String? {
+    let prefix = key + "="
+    guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix(prefix) }) else { return nil }
+    return String(line.dropFirst(prefix.count))
+}
+
+func resolveStaleCancels(cancelDir: URL, statuses: URL) throws {
+    let names = try fm.contentsOfDirectory(atPath: cancelDir.path).filter { $0.hasSuffix(".cancel") }.sorted()
+    for name in names {
+        let id = String(name.dropLast(".cancel".count))
+        guard validID(id), cancelRequested(id: id, cancelDir: cancelDir) else { continue }
+        let statusURL = statuses.appendingPathComponent(id + ".status")
+        guard fm.fileExists(atPath: statusURL.path) else { continue }
+        let text = try String(contentsOf: statusURL, encoding: .utf8)
+        guard let state = statusValue("state", text: text), ["running", "cancelling"].contains(state) else {
+            continue
+        }
+        guard statusValue("id", text: text) == id,
+              let project = statusValue("project", text: text), !project.isEmpty,
+              let heartbeatText = statusValue("heartbeat_epoch", text: text),
+              let heartbeat = TimeInterval(heartbeatText),
+              let pgidText = statusValue("pgid", text: text),
+              let pgid = pid_t(pgidText), pgid > 0 else {
+            throw JobError.message("invalid stale status for \(id)")
+        }
+        guard Date().timeIntervalSince1970 - heartbeat > staleAfter else { continue }
+        guard !processGroupExists(pgid) else { continue }
+        try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
+        try fm.removeItem(at: cancelDir.appendingPathComponent(name))
+    }
+}
+
+func processPendingCancels(requests: URL, cancelDir: URL, statuses: URL) throws {
+    try cancelQueuedRequests(requests: requests, cancelDir: cancelDir, statuses: statuses)
+    try resolveStaleCancels(cancelDir: cancelDir, statuses: statuses)
+}
+
 func stopGroup(_ pgid: pid_t, childStatus: inout Int32, reaped: inout Bool) {
     _ = kill(-pgid, SIGTERM)
     let deadline = Date().addingTimeInterval(5)
@@ -156,7 +194,7 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
                 return
             }
             if Date() >= nextQueuedCancel {
-                try cancelQueuedRequests(requests: requests, cancelDir: cancelDir, statuses: statuses)
+                try processPendingCancels(requests: requests, cancelDir: cancelDir, statuses: statuses)
                 nextQueuedCancel = Date().addingTimeInterval(queuedCancelInterval)
             }
             if Date() >= nextHeartbeat {
@@ -210,7 +248,7 @@ func runOne(configPath: String) throws {
     for dir in [requests, statuses, cancelDir] { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
 
     try cleanTerminalCancels(cancelDir: cancelDir, statuses: statuses)
-    try cancelQueuedRequests(requests: requests, cancelDir: cancelDir, statuses: statuses)
+    try processPendingCancels(requests: requests, cancelDir: cancelDir, statuses: statuses)
 
     let names = try fm.contentsOfDirectory(atPath: requests.path).filter { $0.hasSuffix(".request") }.sorted()
     for name in names {
