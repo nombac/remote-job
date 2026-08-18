@@ -105,6 +105,8 @@ task=simulation-full
 
 ワーカーは形式とタスク名を再検証し、プロジェクト直下で `./run simulation-full` をシェルを介さず実行します。旧形式のrequestは受理しません。更新前に待機中ジョブを完了またはキャンセルしてください。
 
+同期途中のrequestを開いた際に `EDEADLK`（`Resource deadlock avoided`）が発生した場合、ワーカーはstatusを作成せず、ジョブを `queued` のまま残して次回のポーリングで再試行します。読み取り後にrequest形式またはタスク名が不正だと判定された場合は、自動再試行せず `error` とし、projectとtaskを `invalid` と記録します。
+
 `job-delete <request-id>` は、状態が `finished`、`error`、`cancelled` のジョブについて、ステータス、ログ、リクエスト、残存キャンセルファイルを削除します。`queued`、`running`、`cancelling`、`stale` は削除できません。削除後は `job-list` と `job-status` から消え、このツールでは元に戻せません。
 
 表示される状態は `queued`、`running`、`cancelling`、`cancelled`、`finished`、`error`、`stale` のいずれかです。`job-status` には必ずリクエストIDを指定します。詳細ステータスでは、利用可能な場合にワーカー側のログパスも表示されます。そのログは `.remote/status/<job-id>.log` に同期されます。
