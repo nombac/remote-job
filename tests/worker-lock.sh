@@ -34,9 +34,9 @@ wait_state() {
 }
 
 # A manual/launchd-style collision cannot process the next request concurrently.
-first=$(cd "$WORK/projects/lock" && "$TMP/job-submit")
+first=$(cd "$WORK/projects/lock" && "$TMP/job-submit" first-lock)
 sleep 1
-second=$(cd "$WORK/projects/next" && "$TMP/job-submit")
+second=$(cd "$WORK/projects/next" && "$TMP/job-submit" next-marker)
 "$WORKER" --config "$PREFIX/config" & worker_pid=$!
 wait_state "$first" running
 grep -q '^heartbeat_epoch=' "$WORK/.remote/status/$first.status"
@@ -47,16 +47,17 @@ wait "$worker_pid"; worker_pid=
 "$TMP/job-worker"
 state_is "$second" finished
 [ "$(find "$WORK/projects/lock" -name 'start.*' -type f | wc -l | tr -d ' ')" -eq 1 ]
+grep -q '^first-lock$' "$WORK/projects/lock/task"
 
 # flock is released by the OS after a worker crash even though worker.lock remains.
-crashed=$(cd "$WORK/projects/crash" && "$TMP/job-submit")
+crashed=$(cd "$WORK/projects/crash" && "$TMP/job-submit" crash-lock)
 "$WORKER" --config "$PREFIX/config" & worker_pid=$!
 wait_state "$crashed" running
 pgid=$(sed -n 's/^pgid=//p' "$WORK/.remote/status/$crashed.status")
 kill -KILL "$worker_pid"; wait "$worker_pid" 2>/dev/null || true; worker_pid=
 kill -KILL "-$pgid" 2>/dev/null || true
 [ -f "$PREFIX/worker.lock" ]
-after=$(cd "$WORK/projects/after-crash" && "$TMP/job-submit")
+after=$(cd "$WORK/projects/after-crash" && "$TMP/job-submit" after-crash)
 "$WORKER" --config "$PREFIX/config"
 state_is "$after" finished
 

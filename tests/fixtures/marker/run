@@ -1,3 +1,4 @@
 #!/bin/sh
 set -eu
-TZ=Asia/Tokyo /bin/date > started
+[ "$#" -eq 1 ] || exit 2
+printf '%s\n' "$1" > started

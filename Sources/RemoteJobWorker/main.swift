@@ -16,6 +16,12 @@ let heartbeatInterval: TimeInterval = 20
 let queuedCancelInterval: TimeInterval = 1
 let staleAfter: TimeInterval = 180
 let validIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
+let validTaskCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+
+struct JobRequest {
+    let project: String
+    let task: String
+}
 
 func configValue(_ path: String) throws -> String {
     let text = try String(contentsOfFile: path, encoding: .utf8)
@@ -49,8 +55,10 @@ func safeTarget(root: URL, relative: String) throws -> URL {
     return target
 }
 
-func status(_ state: String, id: String, project: String, detail: String = "", heartbeat: Bool = false) -> String {
-    var lines = ["state=\(state)", "id=\(id)", "project=\(project)", "updated=\(jstISO8601.string(from: Date()))"]
+func status(_ state: String, id: String, project: String, task: String,
+            detail: String = "", heartbeat: Bool = false) -> String {
+    var lines = ["state=\(state)", "id=\(id)", "project=\(project)", "task=\(task)",
+                 "updated=\(jstISO8601.string(from: Date()))"]
     if heartbeat { lines.append("heartbeat_epoch=\(Int(Date().timeIntervalSince1970))") }
     if !detail.isEmpty { lines.append(detail.replacingOccurrences(of: "\n", with: " ")) }
     return lines.joined(separator: "\n") + "\n"
@@ -58,6 +66,29 @@ func status(_ state: String, id: String, project: String, detail: String = "", h
 
 func validID(_ id: String) -> Bool {
     !id.isEmpty && id.unicodeScalars.allSatisfy(validIDCharacters.contains)
+}
+
+func validTask(_ task: String) -> Bool {
+    guard let first = task.unicodeScalars.first,
+          CharacterSet.alphanumerics.contains(first) else { return false }
+    return task.unicodeScalars.allSatisfy(validTaskCharacters.contains)
+}
+
+func parseRequest(_ url: URL) throws -> JobRequest {
+    let text = try String(contentsOf: url, encoding: .utf8)
+    guard text.hasSuffix("\n"), !text.hasSuffix("\n\n") else {
+        throw JobError.message("request must end with exactly one newline")
+    }
+    let lines = text.dropLast().split(separator: "\n", omittingEmptySubsequences: false)
+    guard lines.count == 3, lines[0] == "schema_version=2",
+          lines[1].hasPrefix("project="), lines[2].hasPrefix("task=") else {
+        throw JobError.message("invalid request format")
+    }
+    let project = String(lines[1].dropFirst("project=".count))
+    let task = String(lines[2].dropFirst("task=".count))
+    guard !project.isEmpty else { throw JobError.message("request project is empty") }
+    guard validTask(task) else { throw JobError.message("invalid task name") }
+    return JobRequest(project: project, task: task)
 }
 
 func cancelRequested(id: String, cancelDir: URL) -> Bool {
@@ -74,15 +105,14 @@ func cancelQueuedRequests(requests: URL, cancelDir: URL, statuses: URL) throws {
         let statusURL = statuses.appendingPathComponent(id + ".status")
         guard !fm.fileExists(atPath: statusURL.path) else { continue }
         let requestURL = requests.appendingPathComponent(name)
-        let project = try String(contentsOf: requestURL, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
+        let request = try parseRequest(requestURL)
+        try atomicWrite(status("cancelled", id: id, project: request.project, task: request.task), to: statusURL)
         try fm.removeItem(at: requestURL)
         try fm.removeItem(at: cancelDir.appendingPathComponent(id + ".cancel"))
     }
 }
 
-func spawn(entry: URL, target: URL, log: FileHandle) throws -> pid_t {
+func spawn(entry: URL, target: URL, task: String, log: FileHandle) throws -> pid_t {
     var actions: posix_spawn_file_actions_t? = nil
     var attributes: posix_spawnattr_t? = nil
     guard posix_spawn_file_actions_init(&actions) == 0, posix_spawnattr_init(&attributes) == 0 else {
@@ -108,7 +138,9 @@ func spawn(entry: URL, target: URL, log: FileHandle) throws -> pid_t {
     }
     let path = strdup(entry.path)!
     defer { free(path) }
-    var argv: [UnsafeMutablePointer<CChar>?] = [path, nil]
+    let taskArgument = strdup(task)!
+    defer { free(taskArgument) }
+    var argv: [UnsafeMutablePointer<CChar>?] = [path, taskArgument, nil]
     var pid: pid_t = 0
     let result = argv.withUnsafeMutableBufferPointer {
         posix_spawn(&pid, path, &actions, &attributes, $0.baseAddress!, environ)
@@ -139,7 +171,6 @@ func resolveStaleCancels(cancelDir: URL, statuses: URL) throws {
             continue
         }
         guard statusValue("id", text: text) == id,
-              let project = statusValue("project", text: text), !project.isEmpty,
               let heartbeatText = statusValue("heartbeat_epoch", text: text),
               let heartbeat = TimeInterval(heartbeatText),
               let pgidText = statusValue("pgid", text: text),
@@ -148,7 +179,23 @@ func resolveStaleCancels(cancelDir: URL, statuses: URL) throws {
         }
         guard Date().timeIntervalSince1970 - heartbeat > staleAfter else { continue }
         guard !processGroupExists(pgid) else { continue }
-        try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
+        if let project = statusValue("project", text: text), !project.isEmpty,
+           let task = statusValue("task", text: text), validTask(task) {
+            try atomicWrite(status("cancelled", id: id, project: project, task: task), to: statusURL)
+        } else {
+            // タスク導入前の旧statusは、安全確認に必要なID・heartbeat・pgidを検証してから状態だけ更新する。
+            var lines = text.split(separator: "\n").map(String.init)
+            guard let stateIndex = lines.firstIndex(where: { $0.hasPrefix("state=") }) else {
+                throw JobError.message("invalid stale status for \(id)")
+            }
+            lines[stateIndex] = "state=cancelled"
+            if let updatedIndex = lines.firstIndex(where: { $0.hasPrefix("updated=") }) {
+                lines[updatedIndex] = "updated=\(jstISO8601.string(from: Date()))"
+            } else {
+                lines.append("updated=\(jstISO8601.string(from: Date()))")
+            }
+            try atomicWrite(lines.joined(separator: "\n") + "\n", to: statusURL)
+        }
         try fm.removeItem(at: cancelDir.appendingPathComponent(name))
     }
 }
@@ -169,17 +216,17 @@ func stopGroup(_ pgid: pid_t, childStatus: inout Int32, reaped: inout Bool) {
     if !reaped { while waitpid(pgid, &childStatus, 0) < 0 && errno == EINTR {}; reaped = true }
 }
 
-func execute(id: String, project: String, target: URL, entry: URL, statusURL: URL,
+func execute(id: String, project: String, task: String, target: URL, entry: URL, statusURL: URL,
              requests: URL, cancelDir: URL, statuses: URL) throws {
     let logURL = statuses.appendingPathComponent(id + ".log")
     fm.createFile(atPath: logURL.path, contents: nil)
     let log = try FileHandle(forWritingTo: logURL)
     defer { try? log.close() }
-    let pid = try spawn(entry: entry, target: target, log: log)
+    let pid = try spawn(entry: entry, target: target, task: task, log: log)
     var childStatus: Int32 = 0
     var reaped = false
     do {
-        try atomicWrite(status("running", id: id, project: project, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
+        try atomicWrite(status("running", id: id, project: project, task: task, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
         var nextHeartbeat = Date().addingTimeInterval(heartbeatInterval)
         var nextQueuedCancel = Date()
         while true {
@@ -187,9 +234,9 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
             if waited == pid { reaped = true; break }
             if waited < 0 && errno != EINTR { throw JobError.message("waitpid failed") }
             if cancelRequested(id: id, cancelDir: cancelDir) {
-                try atomicWrite(status("cancelling", id: id, project: project, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
+                try atomicWrite(status("cancelling", id: id, project: project, task: task, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
                 stopGroup(pid, childStatus: &childStatus, reaped: &reaped)
-                try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
+                try atomicWrite(status("cancelled", id: id, project: project, task: task), to: statusURL)
                 try? fm.removeItem(at: cancelDir.appendingPathComponent(id + ".cancel"))
                 return
             }
@@ -198,7 +245,7 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
                 nextQueuedCancel = Date().addingTimeInterval(queuedCancelInterval)
             }
             if Date() >= nextHeartbeat {
-                try atomicWrite(status("running", id: id, project: project, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
+                try atomicWrite(status("running", id: id, project: project, task: task, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
                 nextHeartbeat = Date().addingTimeInterval(heartbeatInterval)
             }
             usleep(200_000)
@@ -207,7 +254,7 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
         let code = (childStatus >> 8) & 0xff
         let ok = exited && code == 0
         let detail = exited ? "exit=\(code)" : "signal=\(childStatus & 0x7f)"
-        try atomicWrite(status(ok ? "finished" : "error", id: id, project: project, detail: detail), to: statusURL)
+        try atomicWrite(status(ok ? "finished" : "error", id: id, project: project, task: task, detail: detail), to: statusURL)
     } catch {
         if !reaped { stopGroup(pid, childStatus: &childStatus, reaped: &reaped) }
         throw error
@@ -257,15 +304,19 @@ func runOne(configPath: String) throws {
         let stateURL = statuses.appendingPathComponent(id + ".status")
         if fm.fileExists(atPath: stateURL.path) { continue }
         let requestURL = requests.appendingPathComponent(name)
-        let project = try String(contentsOf: requestURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        var request: JobRequest? = nil
         do {
-            let target = try safeTarget(root: root, relative: project)
+            let parsedRequest = try parseRequest(requestURL)
+            request = parsedRequest
+            let target = try safeTarget(root: root, relative: parsedRequest.project)
             let entry = target.appendingPathComponent("run")
             guard fm.isExecutableFile(atPath: entry.path) else { throw JobError.message("./run is not executable") }
-            try execute(id: id, project: project, target: target, entry: entry,
+            try execute(id: id, project: parsedRequest.project, task: parsedRequest.task,
+                        target: target, entry: entry,
                         statusURL: stateURL, requests: requests, cancelDir: cancelDir, statuses: statuses)
         } catch {
-            try atomicWrite(status("error", id: id, project: project, detail: "error=\(error)"), to: stateURL)
+            try atomicWrite(status("error", id: id, project: request?.project ?? "invalid",
+                                   task: request?.task ?? "invalid", detail: "error=\(error)"), to: stateURL)
         }
         return
     }

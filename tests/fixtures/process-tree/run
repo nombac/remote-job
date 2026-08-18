@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
+[ "$#" -eq 1 ] || exit 2
 trap '' TERM
+printf '%s\n' "$1" > task
 printf '%s\n' "$$" > leader.pid
 ./child &
 wait

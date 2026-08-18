@@ -27,11 +27,33 @@ parse_status() {
     /^heartbeat_epoch=/ && !have_heartbeat { heartbeat=substr($0, 17); have_heartbeat=1 }
     /^updated=/ && !have_updated { updated=substr($0, 9); have_updated=1 }
     /^project=/ && !have_project { project=substr($0, 9); have_project=1 }
-    END { print state; print heartbeat; print updated; print project }
+    /^task=/ && !have_task { task=substr($0, 6); have_task=1 }
+    END { print state; print heartbeat; print updated; print project; print task }
   '
 }
 
 parsed_value() { printf '%s\n' "$1" | sed -n "${2}p"; }
+
+parse_request() {
+  awk '
+    NR == 1 { if ($0 != "schema_version=2") invalid=1; next }
+    NR == 2 { if ($0 !~ /^project=./) invalid=1; else project=substr($0, 9); next }
+    NR == 3 { if ($0 !~ /^task=./) invalid=1; else task=substr($0, 6); next }
+    { invalid=1 }
+    END {
+      if (NR != 3 || invalid) exit 1
+      print project
+      print task
+    }
+  ' "$1"
+}
+
+valid_task() {
+  case "$1" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 jst_timestamp() {
   stamp=$1
@@ -103,7 +125,9 @@ current_project() {
 }
 
 submit() {
-  [ "$#" -eq 0 ] || { echo "usage: job-submit" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { echo "usage: job-submit TASK" >&2; exit 2; }
+  task=$1
+  valid_task "$task" || { echo "job-submit: invalid task name" >&2; exit 2; }
   project=$(current_project) || exit 2
   [ -x "$WORK_ROOT/$project/run" ] || {
     echo "job-submit: current directory does not contain executable ./run" >&2; exit 2
@@ -111,7 +135,7 @@ submit() {
   id="$(TZ=Asia/Tokyo /bin/date +%Y%m%dT%H%M%SJST)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
   tmp=$REQUESTS/.$id.tmp.$$
   trap 'rm -f "$tmp"' EXIT HUP INT TERM
-  printf '%s\n' "$project" > "$tmp"
+  printf 'schema_version=2\nproject=%s\ntask=%s\n' "$project" "$task" > "$tmp"
   mv "$tmp" "$REQUESTS/$id.request"
   trap - EXIT HUP INT TERM
   printf '%s\n' "$id"
@@ -124,9 +148,15 @@ show_one() {
     display_status "$STATUSES/$id.status"
     [ ! -f "$STATUSES/$id.log" ] || printf 'log=%s\n' "$STATUSES/$id.log"
   elif [ -f "$REQUESTS/$id.request" ]; then
+    request=$(parse_request "$REQUESTS/$id.request") || {
+      echo "job-status: invalid request file: $id" >&2; exit 1
+    }
+    project=$(parsed_value "$request" 1)
+    task=$(parsed_value "$request" 2)
+    valid_task "$task" || { echo "job-status: invalid task name: $id" >&2; exit 1; }
     state=queued
     [ ! -f "$CANCEL/$id.cancel" ] || state=cancelling
-    printf 'state=%s\nid=%s\nproject=%s\n' "$state" "$id" "$(sed -n '1p' "$REQUESTS/$id.request")"
+    printf 'state=%s\nid=%s\nproject=%s\ntask=%s\n' "$state" "$id" "$project" "$task"
     updated=$(request_updated "$id")
     [ -z "$updated" ] || printf 'updated=%s\n' "$updated"
   else
@@ -136,6 +166,8 @@ show_one() {
 
 job_list() {
   [ "$#" -eq 0 ] || { echo "usage: job-list" >&2; exit 2; }
+  list_tmp=$(mktemp "${TMPDIR:-/tmp}/remote-job-list.XXXXXX")
+  trap 'rm -f "$list_tmp"' EXIT HUP INT TERM
   {
     for file in "$STATUSES"/*.status; do
       [ -e "$file" ] || continue
@@ -144,8 +176,8 @@ job_list() {
       text=$(cat "$file")
       parsed=$(printf '%s\n' "$text" | parse_status)
       updated=$(jst_timestamp "$(parsed_value "$parsed" 3)")
-      printf '%s\t%s\t%s\t%s\n' "$updated" "$(parsed_value "$parsed" 4)" \
-        "$(effective_state "$parsed")" "$id"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$updated" "$(parsed_value "$parsed" 4)" \
+        "$(parsed_value "$parsed" 5)" "$(effective_state "$parsed")" "$id"
     done
     for file in "$REQUESTS"/*.request; do
       [ -e "$file" ] || continue
@@ -154,13 +186,22 @@ job_list() {
       [ -f "$STATUSES/$id.status" ] && continue
       state=queued
       [ ! -f "$CANCEL/$id.cancel" ] || state=cancelling
-      printf '%s\t%s\t%s\t%s\n' "$(request_updated "$id")" "$(sed -n '1p' "$file")" "$state" "$id"
+      request=$(parse_request "$file") || {
+        echo "job-list: invalid request file: $id" >&2; exit 1
+      }
+      project=$(parsed_value "$request" 1)
+      task=$(parsed_value "$request" 2)
+      valid_task "$task" || { echo "job-list: invalid task name: $id" >&2; exit 1; }
+      printf '%s\t%s\t%s\t%s\t%s\n' "$(request_updated "$id")" "$project" "$task" "$state" "$id"
     done
-  } | sort -r | awk -F '\t' '
-    BEGIN { printf "%-28s %-11s %-53s %s\n", "DIR", "STATE", "REQUEST", "UPDATED (JST)" }
+  } > "$list_tmp"
+  sort -r "$list_tmp" | awk -F '\t' '
+    BEGIN { printf "%-24s %-30s %-11s %-53s %s\n", "DIR", "TASK", "STATE", "REQUEST", "UPDATED (JST)" }
     { stamp=substr($1,1,16); gsub(/T/, " ", stamp); if (stamp == "") stamp="-"; else stamp=stamp " JST";
-      printf "%-28s %-11s %-53s %s\n", $2, $3, $4, stamp }
+      printf "%-24s %-30s %-11s %-53s %s\n", $2, $3, $4, $5, stamp }
   '
+  rm -f "$list_tmp"
+  trap - EXIT HUP INT TERM
 }
 
 cancel_job() {

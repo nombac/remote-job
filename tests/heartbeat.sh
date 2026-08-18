@@ -19,7 +19,7 @@ chmod +x "$PREFIX/bin/remote-job" "$WORK/projects/heartbeat/run"
 printf 'WORK_ROOT=%s\n' "$WORK" > "$PREFIX/config"
 for name in job-submit job-cancel; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
 
-id=$(cd "$WORK/projects/heartbeat" && "$TMP/job-submit")
+id=$(cd "$WORK/projects/heartbeat" && "$TMP/job-submit" heartbeat)
 "$WORKER" --config "$PREFIX/config" & worker_pid=$!
 count=0
 while [ ! -f "$WORK/.remote/status/$id.status" ]; do
