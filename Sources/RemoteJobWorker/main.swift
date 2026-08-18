@@ -13,6 +13,7 @@ let jstISO8601: ISO8601DateFormatter = {
     return formatter
 }()
 let heartbeatInterval: TimeInterval = 20
+let queuedCancelInterval: TimeInterval = 1
 let validIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
 
 func configValue(_ path: String) throws -> String {
@@ -62,6 +63,22 @@ func cancelRequested(id: String, cancelDir: URL) -> Bool {
     let url = cancelDir.appendingPathComponent(id + ".cancel")
     guard let value = try? String(contentsOf: url, encoding: .utf8) else { return false }
     return value.trimmingCharacters(in: .whitespacesAndNewlines) == id
+}
+
+func cancelQueuedRequests(requests: URL, cancelDir: URL, statuses: URL) throws {
+    let names = try fm.contentsOfDirectory(atPath: requests.path).filter { $0.hasSuffix(".request") }.sorted()
+    for name in names {
+        let id = String(name.dropLast(".request".count))
+        guard validID(id), cancelRequested(id: id, cancelDir: cancelDir) else { continue }
+        let statusURL = statuses.appendingPathComponent(id + ".status")
+        guard !fm.fileExists(atPath: statusURL.path) else { continue }
+        let requestURL = requests.appendingPathComponent(name)
+        let project = try String(contentsOf: requestURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
+        try fm.removeItem(at: requestURL)
+        try fm.removeItem(at: cancelDir.appendingPathComponent(id + ".cancel"))
+    }
 }
 
 func spawn(entry: URL, target: URL, log: FileHandle) throws -> pid_t {
@@ -115,7 +132,7 @@ func stopGroup(_ pgid: pid_t, childStatus: inout Int32, reaped: inout Bool) {
 }
 
 func execute(id: String, project: String, target: URL, entry: URL, statusURL: URL,
-             cancelDir: URL, statuses: URL) throws {
+             requests: URL, cancelDir: URL, statuses: URL) throws {
     let logURL = statuses.appendingPathComponent(id + ".log")
     fm.createFile(atPath: logURL.path, contents: nil)
     let log = try FileHandle(forWritingTo: logURL)
@@ -126,6 +143,7 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
     do {
         try atomicWrite(status("running", id: id, project: project, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
         var nextHeartbeat = Date().addingTimeInterval(heartbeatInterval)
+        var nextQueuedCancel = Date()
         while true {
             let waited = waitpid(pid, &childStatus, WNOHANG)
             if waited == pid { reaped = true; break }
@@ -136,6 +154,10 @@ func execute(id: String, project: String, target: URL, entry: URL, statusURL: UR
                 try atomicWrite(status("cancelled", id: id, project: project), to: statusURL)
                 try? fm.removeItem(at: cancelDir.appendingPathComponent(id + ".cancel"))
                 return
+            }
+            if Date() >= nextQueuedCancel {
+                try cancelQueuedRequests(requests: requests, cancelDir: cancelDir, statuses: statuses)
+                nextQueuedCancel = Date().addingTimeInterval(queuedCancelInterval)
             }
             if Date() >= nextHeartbeat {
                 try atomicWrite(status("running", id: id, project: project, detail: "pgid=\(pid)", heartbeat: true), to: statusURL)
@@ -188,6 +210,7 @@ func runOne(configPath: String) throws {
     for dir in [requests, statuses, cancelDir] { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
 
     try cleanTerminalCancels(cancelDir: cancelDir, statuses: statuses)
+    try cancelQueuedRequests(requests: requests, cancelDir: cancelDir, statuses: statuses)
 
     let names = try fm.contentsOfDirectory(atPath: requests.path).filter { $0.hasSuffix(".request") }.sorted()
     for name in names {
@@ -197,18 +220,12 @@ func runOne(configPath: String) throws {
         if fm.fileExists(atPath: stateURL.path) { continue }
         let requestURL = requests.appendingPathComponent(name)
         let project = try String(contentsOf: requestURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        if cancelRequested(id: id, cancelDir: cancelDir) {
-            try atomicWrite(status("cancelled", id: id, project: project), to: stateURL)
-            try? fm.removeItem(at: requestURL)
-            try? fm.removeItem(at: cancelDir.appendingPathComponent(id + ".cancel"))
-            return
-        }
         do {
             let target = try safeTarget(root: root, relative: project)
             let entry = target.appendingPathComponent("run")
             guard fm.isExecutableFile(atPath: entry.path) else { throw JobError.message("./run is not executable") }
             try execute(id: id, project: project, target: target, entry: entry,
-                        statusURL: stateURL, cancelDir: cancelDir, statuses: statuses)
+                        statusURL: stateURL, requests: requests, cancelDir: cancelDir, statuses: statuses)
         } catch {
             try atomicWrite(status("error", id: id, project: project, detail: "error=\(error)"), to: stateURL)
         }

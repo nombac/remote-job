@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-usage() { echo "usage: ./install.sh {client|worker} --work-root PATH [--prefix PATH]" >&2; exit 2; }
+usage() { echo "usage: ./install.sh {client|worker} --work-root PATH [--prefix PATH] [--reload-launch-agent]" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage
 ROLE=$1; shift
 case "$ROLE" in client|worker) ;; *) usage ;; esac
@@ -9,6 +9,7 @@ PREFIX=$HOME/.local/share/remote-job
 WORK_ROOT=
 BUILD_DIR=
 INSTALL_TMP=
+RELOAD_LAUNCH_AGENT=0
 cleanup() {
   [ -z "$INSTALL_TMP" ] || rm -f "$INSTALL_TMP"
   [ -z "$BUILD_DIR" ] || rm -rf "$BUILD_DIR"
@@ -19,14 +20,28 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --prefix) [ "$#" -ge 2 ] || usage; PREFIX=$2; shift 2 ;;
     --work-root) [ "$#" -ge 2 ] || usage; WORK_ROOT=$2; shift 2 ;;
+    --reload-launch-agent) RELOAD_LAUNCH_AGENT=1; shift ;;
     *) usage ;;
   esac
 done
 [ -n "$WORK_ROOT" ] || usage
+[ "$ROLE" = worker ] || [ "$RELOAD_LAUNCH_AGENT" -eq 0 ] || usage
 case "$PREFIX$WORK_ROOT" in *"
 "*) echo "paths may not contain newlines" >&2; exit 2 ;; esac
 SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+LAUNCH_LABEL=com.local.remote-job.worker
+LAUNCH_TARGET="gui/$(id -u)/$LAUNCH_LABEL"
+LAUNCH_LOADED=0
+LAUNCH_RUNNING=0
 if [ "$ROLE" = worker ]; then
+  if LAUNCH_INFO=$(launchctl print "$LAUNCH_TARGET" 2>/dev/null); then
+    LAUNCH_LOADED=1
+    printf '%s\n' "$LAUNCH_INFO" | grep -q 'state = running' && LAUNCH_RUNNING=1 || true
+  fi
+  if [ "$RELOAD_LAUNCH_AGENT" -eq 1 ] && [ "$LAUNCH_RUNNING" -eq 1 ]; then
+    echo "worker install: refusing to reload LaunchAgent while the worker is running" >&2
+    exit 1
+  fi
   command -v swiftc >/dev/null 2>&1 || { echo "worker install needs Xcode Command Line Tools (swiftc)" >&2; exit 1; }
   BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/remote-job-install.XXXXXX")
   swiftc -O "$SCRIPT_DIR/Sources/RemoteJobWorker/main.swift" -o "$BUILD_DIR/remote-job-worker"
@@ -42,7 +57,7 @@ check_link() {
   dest=$1
   if [ -e "$dest" ] && [ ! -L "$dest" ]; then echo "refusing to replace $dest" >&2; exit 1; fi
 }
-for name in job-submit job-status job-list job-cancel; do check_link "$HOME/.local/bin/$name"; done
+for name in job-submit job-status job-list job-cancel job-delete; do check_link "$HOME/.local/bin/$name"; done
 [ "$ROLE" != worker ] || check_link "$HOME/.local/bin/job-worker"
 
 if [ "$ROLE" = worker ]; then
@@ -73,7 +88,7 @@ printf 'WORK_ROOT=%s\n' "$WORK_ROOT" > "$INSTALL_TMP"
 chmod 600 "$INSTALL_TMP"
 mv "$INSTALL_TMP" "$PREFIX/config"
 INSTALL_TMP=
-for name in job-submit job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel job-delete; do
   ln -sfn "$PREFIX/bin/remote-job" "$HOME/.local/bin/$name"
 done
 LEGACY_LINK=$HOME/.local/bin/submit-job
@@ -86,13 +101,20 @@ if [ "$ROLE" = worker ]; then
   ln -sfn "$PREFIX/bin/remote-job-worker" "$HOME/.local/bin/job-worker"
   mkdir -p "$(dirname "$PLIST")"
   atomic_install "$BUILD_DIR/worker.plist" "$PLIST" 644
-  launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  if [ "$LAUNCH_LOADED" -eq 0 ]; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  elif [ "$RELOAD_LAUNCH_AGENT" -eq 1 ]; then
+    launchctl bootout "gui/$(id -u)" "$PLIST"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  else
+    echo "LaunchAgent is already loaded and was not reloaded."
+    echo "To apply plist changes after all jobs finish, rerun with --reload-launch-agent."
+  fi
   echo "Worker installed. Give Full Disk Access to: $PREFIX/bin/remote-job-worker"
   echo "Also mark WORK_ROOT as always available offline/local in the sync app."
 else
   echo "Client installed."
 fi
-echo "Add $HOME/.local/bin to PATH, then use job-submit, job-status, job-list, and job-cancel."
+echo "Add $HOME/.local/bin to PATH, then use job-submit, job-status, job-list, job-cancel, and job-delete."
 cleanup
 trap - EXIT HUP INT TERM

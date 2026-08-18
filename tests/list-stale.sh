@@ -10,7 +10,7 @@ mkdir -p "$WORK" "$PREFIX/bin"
 cp "$ROOT/bin/remote-job" "$PREFIX/bin/remote-job"
 chmod +x "$PREFIX/bin/remote-job"
 printf 'WORK_ROOT=%s\n' "$WORK" > "$PREFIX/config"
-for name in job-status job-list; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
+for name in job-status job-list job-cancel job-delete; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
 
 # An empty/missing status directory is harmless and still prints the header.
 $TMP/job-list | grep -q '^DIR.*STATE.*REQUEST.*UPDATED (JST)$'
@@ -49,7 +49,12 @@ $TMP/job-status newest-running | grep -q '^updated=2026-08-15T19:31:00+09:00$'
 $TMP/job-status "$queued_id" | grep -q '^updated=2026-08-15T16:15:00+09:00$'
 $TMP/job-status old-running | grep -q '^state=stale$'
 $TMP/job-status old-running | grep -q '^reported_state=running$'
+$TMP/job-cancel old-running >/dev/null
+$TMP/job-status old-running | grep -q '^state=stale$'
+if $TMP/job-delete old-running >/dev/null 2>&1; then echo "deleted stale job" >&2; exit 1; fi
 $TMP/job-status done-job | grep -q '^state=finished$'
 $TMP/job-status cancel-job | grep -q '^state=cancelled$'
+$TMP/job-delete error-job | grep -q 'deleted: error-job (error)'
+[ ! -e "$WORK/.remote/status/error-job.status" ]
 
 echo "list/stale test passed"

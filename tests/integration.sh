@@ -20,7 +20,7 @@ cp -R "$ROOT/tests/fixtures/process-tree" "$WORK/projects/process-tree"
 cp "$ROOT/bin/remote-job" "$PREFIX/bin/remote-job"
 chmod +x "$PREFIX/bin/remote-job" "$WORK/projects"/*/run "$WORK/projects/process-tree/child"
 printf 'WORK_ROOT=%s\n' "$WORK" > "$PREFIX/config"
-for name in job-submit job-status job-list job-cancel; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
+for name in job-submit job-status job-list job-cancel job-delete; do ln -s "$PREFIX/bin/remote-job" "$TMP/$name"; done
 
 state_is() { grep -q "^state=$2$" "$WORK/.remote/status/$1.status" 2>/dev/null; }
 wait_state() {
@@ -46,7 +46,7 @@ $TMP/job-status "$normal_id" | grep -q '^state=queued$'
 state_is "$normal_id" finished
 grep -q '^updated=.*+09:00$' "$WORK/.remote/status/$normal_id.status"
 [ -f "$WORK/projects/example/result.txt" ]
-(cd "$WORK/projects/example" && $TMP/job-cancel) | grep -q 'already finished'
+$TMP/job-cancel "$normal_id" | grep -q 'already finished'
 [ ! -f "$WORK/.remote/cancel/$normal_id.cancel" ]
 
 # A nonzero ./run remains a distinct error state.
@@ -56,7 +56,9 @@ state_is "$error_id" error
 
 # Queued cancellation must prevent ./run from starting and remove its request.
 queued_id=$(cd "$WORK/projects/marker" && "$TMP/job-submit")
-(cd "$WORK/projects/marker" && $TMP/job-cancel) | grep -q "$queued_id"
+$TMP/job-cancel "$queued_id" | grep -q "$queued_id"
+$TMP/job-status "$queued_id" | grep -q '^state=cancelling$'
+$TMP/job-list | grep -q "marker.*cancelling.*$queued_id"
 "$WORKER" --config "$PREFIX/config"
 state_is "$queued_id" cancelled
 [ ! -e "$WORK/projects/marker/started" ]
@@ -84,7 +86,15 @@ done
 leader=$(sed -n '1p' "$WORK/projects/process-tree/leader.pid")
 child=$(sed -n '1p' "$WORK/projects/process-tree/child.pid")
 grandchild=$(sed -n '1p' "$WORK/projects/process-tree/grandchild.pid")
-(cd "$WORK/projects/process-tree" && $TMP/job-cancel) | grep -q "$tree_id"
+queued_while_running=$(cd "$WORK/projects/example" && "$TMP/job-submit")
+if $TMP/job-delete "$queued_while_running" >/dev/null 2>&1; then echo "deleted queued job" >&2; exit 1; fi
+$TMP/job-cancel "$queued_while_running" | grep -q "$queued_while_running"
+[ ! -e "$WORK/.remote/cancel/$tree_id.cancel" ]
+wait_state "$queued_while_running" cancelled
+$TMP/job-status "$tree_id" | grep -q '^state=running$'
+$TMP/job-delete "$queued_while_running" | grep -q "deleted: $queued_while_running (cancelled)"
+if $TMP/job-delete "$tree_id" >/dev/null 2>&1; then echo "deleted running job" >&2; exit 1; fi
+$TMP/job-cancel "$tree_id" | grep -q "$tree_id"
 wait_state "$tree_id" cancelling
 wait "$worker_pid"; worker_pid=
 state_is "$tree_id" cancelled
@@ -94,9 +104,22 @@ assert_dead "$leader"; assert_dead "$child"; assert_dead "$grandchild"
 after_id=$(cd "$WORK/projects/example" && "$TMP/job-submit")
 "$WORKER" --config "$PREFIX/config"
 state_is "$after_id" finished
+[ -f "$WORK/.remote/status/$after_id.log" ]
+$TMP/job-delete "$after_id" | grep -q "deleted: $after_id (finished)"
+[ ! -e "$WORK/.remote/status/$after_id.status" ]
+[ ! -e "$WORK/.remote/status/$after_id.log" ]
+[ ! -e "$WORK/.remote/requests/$after_id.request" ]
+if $TMP/job-status "$after_id" >/dev/null 2>&1; then echo "deleted job still has status" >&2; exit 1; fi
+if $TMP/job-list | grep -q "$after_id"; then echo "deleted job is still listed" >&2; exit 1; fi
 
 # Submission accepts no project argument and must be run in the project directory.
 if "$TMP/job-submit" ../outside >/dev/null 2>&1; then echo "accepted project argument" >&2; exit 1; fi
+if "$TMP/job-cancel" >/dev/null 2>&1; then echo "accepted missing job ID" >&2; exit 1; fi
+if "$TMP/job-cancel" 'invalid/id' >/dev/null 2>&1; then echo "accepted invalid job ID" >&2; exit 1; fi
+if "$TMP/job-cancel" unknown-job >/dev/null 2>&1; then echo "accepted unknown job ID" >&2; exit 1; fi
+if "$TMP/job-delete" >/dev/null 2>&1; then echo "job-delete accepted a missing job ID" >&2; exit 1; fi
+if "$TMP/job-delete" 'invalid/id' >/dev/null 2>&1; then echo "job-delete accepted an invalid job ID" >&2; exit 1; fi
+if "$TMP/job-delete" unknown-job >/dev/null 2>&1; then echo "job-delete accepted an unknown job ID" >&2; exit 1; fi
 mkdir -p "$TMP/outside"
 if (cd "$TMP/outside" && "$TMP/job-submit") >/dev/null 2>&1; then echo "accepted directory outside WORK_ROOT" >&2; exit 1; fi
 cp -R "$ROOT/example-project/." "$TMP/outside/"

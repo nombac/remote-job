@@ -33,7 +33,7 @@ while [ "$(sed -n 's/^heartbeat_epoch=//p' "$WORK/.remote/status/$id.status")" =
   count=$((count + 1)); [ "$count" -lt 50 ] || { echo "heartbeat was not refreshed" >&2; exit 1; }
   sleep 0.5
 done
-(cd "$WORK/projects/heartbeat" && $TMP/job-cancel) >/dev/null
+$TMP/job-cancel "$id" >/dev/null
 wait "$worker_pid"; worker_pid=
 grep -q '^state=cancelled$' "$WORK/.remote/status/$id.status"
 

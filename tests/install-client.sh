@@ -31,7 +31,7 @@ HOME="$TEST_HOME" "$ROOT/install.sh" client --work-root "$WORK" --prefix "$PREFI
 configured_root=$(sed -n 's/^WORK_ROOT=//p' "$PREFIX/config")
 [ "$configured_root" = "$(CDPATH= cd -P "$WORK" && pwd)" ]
 installed_prefix=$(CDPATH= cd -P "$PREFIX" && pwd)
-for name in job-submit job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel job-delete; do
   [ "$(readlink "$TEST_HOME/.local/bin/$name")" = "$installed_prefix/bin/remote-job" ]
 done
 [ ! -L "$TEST_HOME/.local/bin/submit-job" ]
@@ -39,7 +39,7 @@ done
 HOME="$TEST_HOME" "$ROOT/uninstall.sh" --prefix "$PREFIX" >/dev/null
 [ ! -e "$PREFIX/bin/remote-job" ]
 [ ! -e "$PREFIX/config" ]
-for name in job-submit job-status job-list job-cancel; do
+for name in job-submit job-status job-list job-cancel job-delete; do
   [ ! -e "$TEST_HOME/.local/bin/$name" ]
 done
 

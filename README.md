@@ -19,6 +19,7 @@
 ~/.local/bin/job-status             シンボリックリンク
 ~/.local/bin/job-list               シンボリックリンク
 ~/.local/bin/job-cancel             シンボリックリンク
+~/.local/bin/job-delete             シンボリックリンク
 ~/.local/bin/job-worker             ワーカー専用シンボリックリンク
 ~/.local/share/remote-job/worker.lock ローカルのワーカーロック
 ~/Library/LaunchAgents/
@@ -52,6 +53,14 @@ WORK_ROOT/.remote/{requests,status,cancel} 共有キュー（自動作成）
 
 `~/.local/bin` が `PATH` に含まれていることを確認してください。インストーラーを再実行すると、同じ構成を維持したままインストール内容が更新されます。
 
+ワーカーの再インストールでは、登録済みLaunchAgentを自動的に再読み込みしません。実行中ジョブを中断せず、新しいワーカーバイナリは次回起動から使われます。plistの変更も適用する場合は、すべてのジョブが終了した後に明示的に再読み込みします：
+
+```sh
+./install.sh worker --work-root "$HOME/Dropbox/Work" --reload-launch-agent
+```
+
+ワーカーが実行中の場合、`--reload-launch-agent` はエラーで停止します。
+
 ### ワーカー側で必要な設定
 
 1. 同期サービスの設定で、ワーカー側Macの `WORK_ROOT` 全体を**常にオフラインで利用可能**、**ダウンロード済み**、または**ローカル**に設定します。プレースホルダーのみのファイルがあると、ジョブが失敗したり、不完全な入力で実行されたりする可能性があります。
@@ -65,13 +74,14 @@ LaunchAgentはこのバイナリを直接実行するため、`/bin/zsh` に広�
 
 ## 使い方
 
-4つのユーザー向けコマンドは、どちらのMacでも同じです：
+5つのユーザー向けコマンドは、どちらのMacでも同じです：
 
 ```sh
 job-submit
 job-status
 job-list
-job-cancel
+job-cancel <request-id>
+job-delete <request-id>
 ```
 
 ジョブを投入するには、対象プロジェクトのディレクトリへ移動して、引数なしで `job-submit` を実行します：
@@ -83,7 +93,9 @@ job-status "$job_id"
 job-list                         # 待機中を含むジョブ一覧（新しい順）
 ```
 
-`job-submit` と `job-cancel` は引数を取らず、どちらも対象プロジェクトのディレクトリ内で実行する必要があります。`job-cancel` はそのプロジェクトで実行中のジョブを優先し、なければ最新の待機中ジョブを選択します。最新のジョブがすでに終了状態にある場合に呼び出しても、安全に何も行いません。`job-status <request-id>` と `job-list` は任意のディレクトリから実行できます。
+`job-submit` は引数を取らず、対象プロジェクトのディレクトリ内で実行する必要があります。`job-cancel <request-id>` と `job-delete <request-id>` は指定したジョブだけを対象とし、`job-status <request-id>` と `job-list` と同様に任意のディレクトリから実行できます。キャンセル対象がすでに終了状態にある場合は、安全に何も行いません。
+
+`job-delete <request-id>` は、状態が `finished`、`error`、`cancelled` のジョブについて、ステータス、ログ、リクエスト、残存キャンセルファイルを削除します。`queued`、`running`、`cancelling`、`stale` は削除できません。削除後は `job-list` と `job-status` から消え、このツールでは元に戻せません。
 
 表示される状態は `queued`、`running`、`cancelling`、`cancelled`、`finished`、`error`、`stale` のいずれかです。`job-status` には必ずリクエストIDを指定します。詳細ステータスでは、利用可能な場合にワーカー側のログパスも表示されます。そのログは `.remote/status/<job-id>.log` に同期されます。
 
@@ -109,7 +121,7 @@ Mac A：job-list
   ↓
 Mac A：job-status <request-id>
   ↓
-Mac A：job-cancel（必要な場合、プロジェクトのディレクトリから）
+Mac A：job-cancel <request-id>（必要な場合）
   ↓
 完了後：対象プロジェクトのディレクトリで次のジョブをjob-submit
 ```
@@ -121,7 +133,7 @@ Mac B：対象プロジェクトのディレクトリでjob-submit
   ↓
 Mac A：job-status <request-id>
   ↓
-Mac A：job-cancel（必要な場合、同じプロジェクトのディレクトリから）
+Mac A：job-cancel <request-id>（必要な場合）
 ```
 
 または、Mac Aからリモートで投入し、Mac Bのワーカーに実行させます：
@@ -131,7 +143,7 @@ Mac A：対象プロジェクトのディレクトリでjob-submit
   ↓
 Mac B：ワーカーが./runを実行
   ↓
-Mac A：job-status <request-id> / job-cancel
+Mac A：job-status <request-id> / job-cancel <request-id>
 ```
 
 ジョブは、次の30秒間隔のアイドルポーリング後にMac Bで開始されます。ステータス、ログ、キャンセルリクエストは、通常の同期フォルダを介してMac間を移動します。
@@ -141,6 +153,7 @@ Mac A：job-status <request-id> / job-cancel
 cd "$HOME/Dropbox/Work/my-project"
 id=$(job-submit)
 job-status "$id"       # queued → running → finished/error
+# job-cancel "$id"     # 必要な場合
 ```
 
 同梱の [`example-project`](example-project) は、必須となるエントリーポイントの例です。実行可能な `run` は単に `make` を呼び出します。
@@ -151,11 +164,13 @@ job-status "$id"       # queued → running → finished/error
 
 `stale` は、ステータス上ではジョブが実行中であるものの、最近のワーカーのハートビートが確認できないことを意味します。ジョブの失敗を証明するものでは**ありません**。Mac Bの電源が切れている、ワーカーやOSが停止している、またはフォルダの同期が単に遅れている可能性があります。この表示ルールによって `queued`、`finished`、`error`、`cancelled` が `stale` に変わることはありません。
 
+`stale` では、計算プロセスが監視なしで動いている、すでに終了または停止している、ワーカーMacが停止している、同期が遅延している、ステータスが不正である、といった複数の可能性を区別できません。そのため `job-delete` は `stale` を拒否します。`job-cancel <request-id>` を実行しても、ワーカーがキャンセル要求を処理できなければ状態は `stale` のままです。ワーカーが復帰して状態が `cancelled` になった場合に限り、`job-delete` で削除できます。
+
 ### キャンセルの動作
 
 各 `./run` は、それぞれ独立したPOSIXプロセスグループ内で直接開始されます。キャンセル時、ワーカーは状態を `running` から `cancelling` にアトミックに変更し、**プロセスグループ全体**に `SIGTERM` を送信して最大5秒待機します。その後もプロセスが残っていれば、グループに `SIGKILL` を送信します。これにより、親プロセスだけでなく、一般的な `./run → make → Python/Wolfram/その他の計算処理` というプロセスツリー全体が停止します。終了状態は `error` とは区別される `cancelled` です。
 
-待機中ジョブのキャンセルは、実行前にリクエストIDで照合されます。ワーカーは `./run` を開始せずに `cancelled` を記録し、対応するリクエストを削除します。各キャンセルファイルの内容とファイル名には、同じグローバルに一意なリクエストIDが使われます。そのため、古いファイルの再出現や同期サービスによる競合コピーが、後続のジョブを対象にすることはありません。終了状態のキャンセルファイルは削除されるだけで、再び処理されることはありません。
+待機中ジョブへキャンセルを要求すると、クライアントでは直ちに `cancelling` と表示されます。実行中のワーカーは待機中ジョブのキャンセルも定期的に確認し、現在のジョブの終了を待たずに `cancelled` を記録して対応するリクエストを削除します。各キャンセルファイルの内容とファイル名には、同じグローバルに一意なリクエストIDが使われます。そのため、古いファイルの再出現や同期サービスによる競合コピーが、後続のジョブを対象にすることはありません。終了状態のキャンセルファイルは削除されるだけで、再び処理されることはありません。
 
 ## セキュリティモデルと注意事項
 
@@ -208,6 +223,7 @@ tests/heartbeat.sh
 tests/integration.sh
 tests/worker-lock.sh
 tests/install-client.sh
+tests/install-worker.sh
 ```
 
 ワーカーはキューを1回スキャンし、通常は1件のジョブを処理した後に終了します。そのジョブの実行中は、ID固有のキャンセルファイルを監視するために動作し続けます。`launchd` が30秒間隔のアイドルポーリングを提供し、同じLaunchAgentのインスタンスが重複して動作するのを防ぎます。
